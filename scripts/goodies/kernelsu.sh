@@ -351,7 +351,7 @@ cd ..
 cd "$KERNEL_DIR"
 if [ -f "KernelSU/kernel/policy/app_profile.c" ]; then
     echo "-- ZephyrSU: Patching app_profile.c for 4.19..."
-    python3 - "$KERNEL_DIR/KernelSU/kernel/policy/app_profile.c" <<'PYEOF'
+    python3 - "KernelSU/kernel/policy/app_profile.c" <<'PYEOF'
 import sys
 path = sys.argv[1]
 src = open(path).read()
