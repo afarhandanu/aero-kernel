@@ -1,0 +1,49 @@
+name: Build & Test Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'device:os pairs (e.g. "mi89x7:mithorium"). Empty = builds all configs in devices/.'
+        required: false
+        type: string
+        default: 'mi89x7:mithorium'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.ts.outputs.DATE }}
+      build_type: ${{ steps.ts.outputs.KERNEL_BUILD_TYPE }}
+    steps:
+      - id: ts
+        run: |
+          echo "DATE=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          echo "KERNEL_BUILD_TYPE=Testing" >> $GITHUB_OUTPUT
+
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.devices.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect device configs
+        id: devices
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: echo "matrix=$(python3 .github/scripts/matrix.py)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [setup, discover]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/build-device.yml
+    with:
+      device: ${{ matrix.device }}
+      os: ${{ matrix.os }}
+      build_date: ${{ needs.setup.outputs.build_date }}
+      build_type: ${{ needs.setup.outputs.build_type }}
+      artifact_retention_days: 7
+    secrets: inherit

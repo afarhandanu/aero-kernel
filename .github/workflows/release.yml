@@ -1,0 +1,111 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (e.g. Release, Testing)'
+        required: false
+        default: 'Release'
+  schedule:
+    - cron: '30 1 * * 0'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.ts.outputs.DATE }}
+      timestamp: ${{ steps.ts.outputs.TIME }}
+      fancy_date: ${{ steps.ts.outputs.FANCYDATE }}
+      build_type: ${{ steps.ts.outputs.KERNEL_BUILD_TYPE }}
+    steps:
+      - id: ts
+        run: |
+          echo "DATE=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          echo "TIME=$(date +'%s')" >> $GITHUB_OUTPUT
+          echo "FANCYDATE=$(date +'%Y/%m/%d')" >> $GITHUB_OUTPUT
+          echo "KERNEL_BUILD_TYPE=${{ github.event.inputs.build_type || 'Release' }}" >> $GITHUB_OUTPUT
+
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.devices.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect device configs
+        id: devices
+        run: echo "matrix=$(python3 .github/scripts/matrix.py)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [setup, discover]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/build-device.yml
+    with:
+      device: ${{ matrix.device }}
+      os: ${{ matrix.os }}
+      build_date: ${{ needs.setup.outputs.build_date }}
+      build_type: ${{ needs.setup.outputs.build_type }}
+      artifact_retention_days: 30
+    secrets: inherit
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: List downloaded zips
+        run: ls -lah artifacts
+
+      - name: Extract Release Info
+        id: info
+        run: |
+          INFO_FILE=$(find ./artifacts -name "release_info.txt" | head -n 1)
+          if [ -n "$INFO_FILE" ] && [ -f "$INFO_FILE" ]; then
+            cat "$INFO_FILE" >> $GITHUB_OUTPUT
+            echo "Loaded versions from $INFO_FILE!"
+          else
+            echo "KSU_NAME=ZephyrSU" >> $GITHUB_OUTPUT
+            echo "KSU_CODE=Latest" >> $GITHUB_OUTPUT
+            echo "BBG_VER=Unknown" >> $GITHUB_OUTPUT
+            echo "NOMOUNT_VER=Unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release and Upload builds
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: aero-release-${{ needs.setup.outputs.timestamp }}
+          name: Aero Kernel ${{ needs.setup.outputs.fancy_date }}
+          draft: false
+          prerelease: false
+          files: ./artifacts/**/*.zip
+          body: |
+            ## Aero Kernel for MSM8937 (mi89x7)
+            Automated kernel build with ZephyrSU, Baseband Guard, NoMount, and Droidspaces.
+
+            ### Component Versions:
+            - **Root Solution:** ${{ steps.info.outputs.KSU_NAME }} (${{ steps.info.outputs.KSU_CODE }})
+            - **Baseband Guard:** ${{ steps.info.outputs.BBG_VER }}
+            - **NoMount Version:** ${{ steps.info.outputs.NOMOUNT_VER }}
+
+            ### Kernel Release String:
+            - Format: `4.19.xxx-Aero-Mi8937v2`
+
+            ### Supported Devices (MSM8937 / mi89x7):
+            - Redmi 4X (`santoni`)
+            - Redmi 4A (`rolex`)
+            - Redmi 5A (`riva`)
+            - Redmi Note 5A / Y1 Prime (`ugg`)
+            - Redmi Note 5A Lite / Y1 Lite (`ugglite`)
+            - Redmi 4 (`prada`)
+            - Redmi 3S (`land`)

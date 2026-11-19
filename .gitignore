@@ -1,0 +1,13 @@
+out/
+build.log
+config.log
+final.config
+release_info.txt
+*.zip
+*.tar.zst
+clang/
+AnyKernel3/
+android_kernel_*/
+KernelSU/
+.ccache/
+.DS_Store
