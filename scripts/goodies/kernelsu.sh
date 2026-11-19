@@ -605,3 +605,109 @@ else:
 PYEOF
 fi
 cd ..
+
+
+# 10. Fix rules.c patch anchors for 4.19 (4-space indent, not tab)
+# Patch #9's rules.c replacements used tab-indented anchors, but rules.c
+# uses 4-space indentation, so none of them matched (the build log shows
+# "!! rules.c anchor not found, patch skipped" for all four). Redo the
+# same four replacements matching on stripped content, which does not
+# depend on indentation. The sepolicy.h alias, the
+# ksu_install_selinux_policy_419() helper and the selinux_hide.c lines
+# from patch #9 already apply, so this block only repeats the four
+# rules.c replacements (8 replacements in total: 2 each).
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/rules.c" ]; then
+    echo "-- ZephyrSU: Patching rules.c anchors for 4.19 (indent-independent)..."
+    python3 - "KernelSU/kernel/selinux/rules.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.read().splitlines(keepends=True)
+
+out = []
+counts = {"mutex_lock": 0, "old_pol": 0, "mutex_unlock": 0, "install": 0}
+warned = []
+
+i = 0
+while i < len(lines):
+    line = lines[i]
+    stripped = line.strip()
+    ind = line[:len(line) - len(line.lstrip())]
+
+    if stripped == "mutex_lock(&selinux_state.policy_mutex);":
+        out.append("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n")
+        out.append(ind + "mutex_lock(&selinux_state.policy_mutex);\n")
+        out.append("#endif\n")
+        counts["mutex_lock"] += 1
+        i += 1
+        continue
+
+    if stripped == "old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));":
+        out.append("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n")
+        out.append(ind + "old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));\n")
+        out.append("#else\n")
+        out.append(ind + "old_pol = selinux_state.ss;\n")
+        out.append("#endif\n")
+        counts["old_pol"] += 1
+        i += 1
+        continue
+
+    if stripped == "mutex_unlock(&selinux_state.policy_mutex);":
+        out.append("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n")
+        out.append(ind + "mutex_unlock(&selinux_state.policy_mutex);\n")
+        out.append("#else\n")
+        out.append(ind + ";\n")
+        out.append("#endif\n")
+        counts["mutex_unlock"] += 1
+        i += 1
+        continue
+
+    if stripped == "rcu_assign_pointer(selinux_state.policy, pol);":
+        block = [lines[j].strip() for j in range(i, min(i + 4, len(lines)))]
+        expected = [
+            "rcu_assign_pointer(selinux_state.policy, pol);",
+            "synchronize_rcu();",
+            "ksu_destroy_sepolicy(old_pol);",
+            "reset_avc_cache(pol->latest_granting);",
+        ]
+        after = lines[i + 4].strip() if i + 4 < len(lines) else ""
+        if block == expected and after in ("out_unlock:", "ret = success_cmd_count;"):
+            out.append("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n")
+            out.append(ind + "rcu_assign_pointer(selinux_state.policy, pol);\n")
+            out.append(ind + "synchronize_rcu();\n")
+            out.append(ind + "ksu_destroy_sepolicy(old_pol);\n")
+            out.append(ind + "reset_avc_cache(pol->latest_granting);\n")
+            out.append("#else\n")
+            if after == "out_unlock:":
+                out.append(ind + "if (!ksu_install_selinux_policy_419(pol)) goto out_unlock;\n")
+            else:
+                out.append(ind + "if (!ksu_install_selinux_policy_419(pol)) {\n")
+                out.append(ind + "    ret = -ENOMEM;\n")
+                out.append(ind + "    goto out_unlock;\n")
+                out.append(ind + "}\n")
+            out.append("#endif\n")
+            counts["install"] += 1
+            i += 4
+            continue
+        warned.append("install block at line %d not replaced (after: %s)" % (i + 1, after))
+        out.append(line)
+        i += 1
+        continue
+
+    out.append(line)
+    i += 1
+
+with open(path, "w") as f:
+    f.writelines(out)
+
+for w in warned:
+    print("!! rules.c (patch #10): " + w)
+for name, n in counts.items():
+    if n == 0:
+        print("!! rules.c (patch #10): no match for " + name)
+print(" -> Patched rules.c anchors for 4.19 (indent-independent, %d replacement(s))" % sum(counts.values()))
+PYEOF
+    cd ..
+fi
