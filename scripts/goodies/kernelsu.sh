@@ -391,3 +391,53 @@ if src != orig:
 PYEOF
 fi
 cd ..
+
+
+# 8. Patch cpu_spoof.c for kernels < 5.7: struct clocksource only gained
+#    vdso_clock_mode in 5.7, so the curr_clocksource write fails on 4.19
+#    with "no member named 'vdso_clock_mode' in 'struct clocksource'".
+#    Guard the whole curr_clocksource block: on kernels below 5.7 the
+#    vDSO clock mode is already set through vdso_data[].clock_mode and
+#    vdso_default, so skipping this write loses nothing and avoids a
+#    spurious "missing" count if the symbol is unresolvable.
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/extension/cpu_spoof.c" ]; then
+  echo "-- ZephyrSU: Patching cpu_spoof.c for 4.19..."
+  python3 - "KernelSU/kernel/extension/cpu_spoof.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+orig = src
+# vdso_clock_mode only exists in struct clocksource from 5.7.
+# Find the curr_clocksource block and wrap it in a version guard.
+# The file is indented with 4 spaces, but match on content so the
+# patch does not depend on the exact indentation.
+lines = src.split("\n")
+start = None
+for i, line in enumerate(lines):
+    if "struct clocksource **curr_cs_ptr =" in line:
+        start = i - 1
+        break
+if start is None or lines[start].strip() != "{":
+    print("!! cpu_spoof.c curr_cs block anchor not found, patch skipped")
+else:
+    depth = 0
+    end = None
+    for j in range(start, len(lines)):
+        depth += lines[j].count("{") - lines[j].count("}")
+        if depth == 0:
+            end = j
+            break
+    if end is None:
+        print("!! cpu_spoof.c curr_cs block end not found, patch skipped")
+    else:
+        block = lines[start:end + 1]
+        guarded = ["#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)"] + block + ["#endif"]
+        lines[start:end + 1] = guarded
+        src = "\n".join(lines)
+        print(" -> Patched cpu_spoof.c for 4.19 (curr_clocksource vdso_clock_mode guard)")
+if src != orig:
+    open(path, "w").write(src)
+PYEOF
+fi
+cd ..
