@@ -37,26 +37,28 @@ if os.path.exists(fw_path):
     with open(fw_path, "r") as f:
         code = f.read()
 
+    # Wrap ksu_wrapper_iopoll definition in >= 5.1.0
     target_iopoll = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\nstatic int ksu_wrapper_iopoll"
-    if target_iopoll in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)" not in code:
+    anchor_iopoll = "\n#endif\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate"
+    if target_iopoll in code and anchor_iopoll in code:
         code = code.replace(target_iopoll, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n" + target_iopoll, 1)
-        anchor = "\n#endif\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate"
-        if anchor in code:
-            code = code.replace(anchor, "\n#endif\n#endif // 5.1.0\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate", 1)
+        code = code.replace(anchor_iopoll, "\n#endif\n#endif // 5.1.0\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate", 1)
 
+    # Wrap iopoll assignment in >= 5.1.0
     assign_iopoll = "    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;"
-    if assign_iopoll in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)" not in code:
+    if assign_iopoll in code:
         code = code.replace(assign_iopoll, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n" + assign_iopoll + "\n#endif", 1)
 
+    # Wrap ksu_wrapper_remap_file_range definition in >= 5.0.0
     target_remap = "static loff_t ksu_wrapper_remap_file_range("
-    if target_remap in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)" not in code:
+    anchor_remap = "static int ksu_wrapper_fadvise("
+    if target_remap in code and anchor_remap in code:
         code = code.replace(target_remap, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n" + target_remap, 1)
-        anchor_remap = "static int ksu_wrapper_fadvise("
-        if anchor_remap in code:
-            code = code.replace(anchor_remap, "#endif // 5.0.0\n\n" + anchor_remap, 1)
+        code = code.replace(anchor_remap, "#endif // 5.0.0\n\n" + anchor_remap, 1)
 
+    # Wrap remap_file_range assignment in >= 5.0.0
     assign_remap = "    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;"
-    if assign_remap in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)" not in code:
+    if assign_remap in code:
         code = code.replace(assign_remap, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n" + assign_remap + "\n#endif", 1)
 
     with open(fw_path, "w") as f:
