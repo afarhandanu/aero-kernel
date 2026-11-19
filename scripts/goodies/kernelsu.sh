@@ -12,20 +12,56 @@ curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$KSU_SETUP_
     exit 1
 }
 
-# Fix MODULE_IMPORT_NS compatibility in ZephyrSU for kernels < 5.4 (such as 4.19)
-if [ -f KernelSU/kernel/core/init.c ]; then
-    echo "-- ZephyrSU: Patching MODULE_IMPORT_NS compatibility for kernel $KERNEL_VERSION..."
+# Fix ZephyrSU compatibility for kernels < 5.4 (such as 4.19)
+if [ -d KernelSU/kernel ]; then
+    echo "-- ZephyrSU: Patching 4.19 compatibility..."
     python3 - <<'PY'
-path = "KernelSU/kernel/core/init.c"
-with open(path, "r") as f:
-    code = f.read()
-target = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
-replacement = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
-if target in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)" not in code:
-    code = code.replace(target, replacement, 1) + "\n#endif\n"
-    with open(path, "w") as f:
+import os
+
+# 1. Patch MODULE_IMPORT_NS in core/init.c (< 5.4)
+init_path = "KernelSU/kernel/core/init.c"
+if os.path.exists(init_path):
+    with open(init_path, "r") as f:
+        code = f.read()
+    target = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
+    replacement = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
+    if target in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)" not in code:
+        code = code.replace(target, replacement, 1) + "\n#endif\n"
+        with open(init_path, "w") as f:
+            f.write(code)
+        print("   -> Wrapped MODULE_IMPORT_NS in LINUX_VERSION_CODE >= 5.4.0")
+
+# 2. Patch iopoll (< 5.1) and remap_file_range (< 5.0) in infra/file_wrapper.c
+fw_path = "KernelSU/kernel/infra/file_wrapper.c"
+if os.path.exists(fw_path):
+    with open(fw_path, "r") as f:
+        code = f.read()
+
+    target_iopoll = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\nstatic int ksu_wrapper_iopoll"
+    if target_iopoll in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)" not in code:
+        code = code.replace(target_iopoll, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n" + target_iopoll, 1)
+        anchor = "\n#endif\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate"
+        if anchor in code:
+            code = code.replace(anchor, "\n#endif\n#endif // 5.1.0\n\n#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\nstatic int ksu_wrapper_iterate", 1)
+
+    assign_iopoll = "    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;"
+    if assign_iopoll in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)" not in code:
+        code = code.replace(assign_iopoll, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n" + assign_iopoll + "\n#endif", 1)
+
+    target_remap = "static loff_t ksu_wrapper_remap_file_range("
+    if target_remap in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)" not in code:
+        code = code.replace(target_remap, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n" + target_remap, 1)
+        anchor_remap = "static int ksu_wrapper_fadvise("
+        if anchor_remap in code:
+            code = code.replace(anchor_remap, "#endif // 5.0.0\n\n" + anchor_remap, 1)
+
+    assign_remap = "    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;"
+    if assign_remap in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)" not in code:
+        code = code.replace(assign_remap, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n" + assign_remap + "\n#endif", 1)
+
+    with open(fw_path, "w") as f:
         f.write(code)
-    print("   -> Wrapped MODULE_IMPORT_NS in LINUX_VERSION_CODE >= 5.4.0")
+    print("   -> Injected file_wrapper.c compat guards for kernel < 5.1")
 PY
 fi
 
