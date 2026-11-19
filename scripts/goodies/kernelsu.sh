@@ -1196,3 +1196,37 @@ print(" -> Patched sepolicy.c add_type plain-array guard for 4.19 (%d insertion(
 PYEOF
 fi
 cd ..
+
+
+# 16. Patch sulog/event.c for 4.19: linux/minmax.h is a 6.3 header (< 6.3: use linux/kernel.h)
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/sulog/event.c" ]; then
+python3 - "KernelSU/kernel/sulog/event.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+count = 0
+hits = [i for i, line in enumerate(lines) if line.strip() == "#include <linux/minmax.h>"]
+if not hits:
+    print("!! sulog/event.c anchor not found, patch skipped: #include <linux/minmax.h>")
+else:
+    for idx in reversed(hits):
+        lines[idx:idx + 1] = [
+            "#include <linux/version.h>\n",
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)\n",
+            "#include <linux/minmax.h>\n",
+            "#else\n",
+            "#include <linux/kernel.h>\n",
+            "#endif\n",
+        ]
+        count += 1
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched sulog/event.c for 4.19 (minmax.h -> kernel.h, %d replacement(s))" % count)
+PYEOF
+fi
+cd ..
