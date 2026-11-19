@@ -291,3 +291,55 @@ unstatic "security/selinux/ss/services.c" "void security_dump_masked_av"
 unstatic "security/selinux/ss/services.c" "void context_struct_compute_av"
 
 cd ..
+# 6. Patch allowlist.c and supercall.c: TWA_RESUME only exists from 5.8,
+#    so define it as true below 5.8 (task_work_add takes a boolean there).
+#    allowlist.c also needs <linux/sched/task.h> for put_task_struct().
+#    Runs after the main flow, so it re-enters the kernel directory first.
+cd "$KERNEL_DIR"
+if [ -f KernelSU/kernel/policy/allowlist.c ] || [ -f KernelSU/kernel/supercall/supercall.c ]; then
+    echo "-- ZephyrSU: Patching allowlist.c and supercall.c for 4.19..."
+    python3 - <<'PY'
+import os
+
+guard = ("// Older kernels use a boolean task_work notification argument.\n"
+                "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) &&!defined(TWA_RESUME)\n"
+                "#define TWA_RESUME true\n"
+                "#endif")
+
+# put_task_struct() is declared in <linux/sched/task.h> on 4.19.
+al_path = "KernelSU/kernel/policy/allowlist.c"
+if os.path.exists(al_path):
+    with open(al_path, "r") as f:
+        code = f.read()
+    orig = code
+    anchor_tw = "#include <linux/task_work.h>"
+    if "#include <linux/sched/task.h>" not in code and anchor_tw in code:
+        code = code.replace(anchor_tw, anchor_tw + "\n#include <linux/sched/task.h>", 1)
+    elif "#include <linux/sched/task.h>" not in code:
+        print("   !! allowlist.c task_work.h anchor not found")
+    if code != orig:
+        with open(al_path, "w") as f:
+            f.write(code)
+        print("   -> Patched allowlist.c for 4.19 (sched/task.h)")
+
+# TWA_RESUME is a boolean notify argument below 5.8.
+for sp_path in ["KernelSU/kernel/policy/allowlist.c",
+                "KernelSU/kernel/supercall/supercall.c"]:
+    label = sp_path.rsplit("/", 1)[-1]
+    if not os.path.exists(sp_path):
+        continue
+    with open(sp_path, "r") as f:
+        code = f.read()
+    orig = code
+    anchor_ver = "#include <linux/version.h>"
+    if "#define TWA_RESUME true" not in code and anchor_ver in code:
+        code = code.replace(anchor_ver, anchor_ver + "\n" + guard, 1)
+    elif "#define TWA_RESUME true" not in code:
+        print("   !! " + label + " version.h anchor not found")
+    if code != orig:
+        with open(sp_path, "w") as f:
+            f.write(code)
+        print("   -> Patched " + label + " for 4.19 (TWA_RESUME)")
+PY
+fi
+cd ..
