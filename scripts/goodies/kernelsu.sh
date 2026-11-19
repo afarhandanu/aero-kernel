@@ -800,3 +800,349 @@ print(" -> Patched rules.c install blocks for 4.19 (blank-tolerant, %d replaceme
 PYEOF
     cd ..
 fi
+
+
+# 12. Patch sepolicy.c avtab / type_attr_map_array for 4.19 flex_array layout (< 5.7)
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/sepolicy.c" ]; then
+python3 - "KernelSU/kernel/selinux/sepolicy.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+count = 0
+
+def replace_guarded(anchor, old_text, new_text, ver):
+    global count
+    hits = [i for i, line in enumerate(lines) if line.strip() == anchor]
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        ind = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+        lines[idx:idx + 1] = [
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(%s)\n" % ver,
+            ind + old_text + "\n",
+            "#else\n",
+            ind + new_text + "\n",
+            "#endif\n",
+        ]
+    count += len(hits)
+    return len(hits)
+
+# (A) remove_avtab_node: 4.19 keeps avtab buckets in a flex_array, not a
+# plain array of struct avtab_node pointers (plain array from 5.7).
+replace_guarded("for (n = db->te_avtab.htable[i]; n; prev = n, n = n->next) {",
+                "for (n = db->te_avtab.htable[i]; n; prev = n, n = n->next) {",
+                "for (n = flex_array_get_ptr(db->te_avtab.htable, i); n; prev = n, n = n->next) {",
+                "5, 7, 0")
+replace_guarded("db->te_avtab.htable[i] = n->next;",
+                "db->te_avtab.htable[i] = n->next;",
+                "flex_array_put_ptr(db->te_avtab.htable, i, n->next, GFP_KERNEL);",
+                "5, 7, 0")
+replace_guarded("removed.htable[0] = n;",
+                "removed.htable[0] = n;",
+                "flex_array_put_ptr(removed.htable, 0, n, GFP_KERNEL);",
+                "5, 7, 0")
+
+# (D) add_typeattribute_raw: the type_attr_map_array entry is reached
+# through the flex_array on 4.19.
+replace_guarded("struct ebitmap *sattr = &db->type_attr_map_array[type->value - 1];",
+                "struct ebitmap *sattr = &db->type_attr_map_array[type->value - 1];",
+                "struct ebitmap *sattr = flex_array_get(db->type_attr_map_array, type->value - 1);",
+                "5, 7, 0")
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched sepolicy.c avtab / type_attr_map for 4.19 (%d replacement(s))" % count)
+PYEOF
+fi
+cd ..
+
+# 13. Patch sepolicy.c add_type for 4.19 flex_array type maps (< 5.7)
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/sepolicy.c" ]; then
+python3 - "KernelSU/kernel/selinux/sepolicy.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+count = 0
+
+def insert_before(anchor, block):
+    global count
+    hits = [i for i, line in enumerate(lines) if line.strip() == anchor]
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx:idx] = block
+    count += len(hits)
+    return len(hits)
+
+# Helper: grow a flex_array by one element, copying the old elements.
+helper = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+/* 4.19: the policydb type maps are flex_arrays, not plain arrays.
+ * Grow one by a single element, copying the existing elements. */
+static struct flex_array *ksu_flex_array_grow(struct flex_array *old,
+                                                unsigned int new_n,
+                                                size_t elem_size,
+                                                gfp_t flags)
+{
+    struct flex_array *new;
+    unsigned int i;
+
+    new = flex_array_alloc(elem_size, new_n, flags | __GFP_ZERO);
+    if (!new)
+        return NULL;
+    if (flex_array_prealloc(new, 0, new_n, flags | __GFP_ZERO)) {
+        flex_array_free(new);
+        return NULL;
+    }
+    for (i = 0; i < new_n - 1; i++) {
+        void *elem = flex_array_get(old, i);
+
+        if (elem && flex_array_put(new, i, elem, flags)) {
+            flex_array_free(new);
+            return NULL;
+        }
+    }
+    flex_array_free(old);
+    return new;
+}
+#endif
+
+"""
+insert_before("static bool add_type(struct policydb *db, const char *type_name, bool attr)", helper.splitlines(keepends=True))
+
+# 4.19: grow the three type maps as flex_arrays, then return early so the
+# plain-array kvrealloc block below is skipped.
+flex_block = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+    /* 4.19: the type maps are flex_arrays; grow each by one entry. */
+    {
+        struct flex_array *new_attr_map;
+        struct flex_array *new_type_struct;
+        struct flex_array *new_sym_names;
+        struct ebitmap *new_ebitmap;
+        int j;
+
+        new_attr_map = ksu_flex_array_grow(db->type_attr_map_array, value,
+                                           sizeof(struct ebitmap), GFP_KERNEL);
+        new_type_struct =
+            ksu_flex_array_grow(db->type_val_to_struct_array, value,
+                                sizeof(struct type_datum *), GFP_KERNEL);
+        new_sym_names = ksu_flex_array_grow(db->sym_val_to_name[SYM_TYPES], value,
+                                            sizeof(char *), GFP_KERNEL);
+        if (!new_attr_map || !new_type_struct || !new_sym_names) {
+            if (new_attr_map)
+                flex_array_free(new_attr_map);
+            if (new_type_struct)
+                flex_array_free(new_type_struct);
+            if (new_sym_names)
+                flex_array_free(new_sym_names);
+            return false;
+        }
+        db->type_attr_map_array = new_attr_map;
+        db->type_val_to_struct_array = new_type_struct;
+        db->sym_val_to_name[SYM_TYPES] = new_sym_names;
+
+        new_ebitmap = flex_array_get(db->type_attr_map_array, value - 1);
+        ebitmap_init(new_ebitmap);
+        ebitmap_set_bit(new_ebitmap, value - 1, 1);
+
+        flex_array_put_ptr(db->type_val_to_struct_array, value - 1, type,
+                           GFP_KERNEL);
+        flex_array_put_ptr(db->sym_val_to_name[SYM_TYPES], value - 1, key,
+                           GFP_KERNEL);
+
+        for (j = 0; j < db->p_roles.nprim; ++j)
+            ebitmap_set_bit(&db->role_val_to_struct[j]->types, value - 1, 1);
+        return true;
+    }
+#endif
+
+"""
+insert_before("struct ebitmap *new_type_attr_map_array =", flex_block.splitlines(keepends=True))
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched sepolicy.c add_type for 4.19 (%d insertion(s))" % count)
+PYEOF
+fi
+cd ..
+
+# 14. Patch sepolicy.c add_filename_trans for the 4.19 filename_trans layout (< 5.9)
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/sepolicy.c" ]; then
+python3 - "KernelSU/kernel/selinux/sepolicy.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+count = 0
+
+def find_all(anchor):
+    return [i for i, line in enumerate(lines) if line.strip() == anchor]
+
+def replace_guarded(anchor, old_text, new_text, ver):
+    global count
+    hits = find_all(anchor)
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        ind = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+        lines[idx:idx + 1] = [
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(%s)\n" % ver,
+            ind + old_text + "\n",
+            "#else\n",
+            ind + new_text + "\n",
+            "#endif\n",
+        ]
+    count += len(hits)
+    return len(hits)
+
+def replace_lines(anchor, new_lines):
+    global count
+    hits = find_all(anchor)
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx:idx + 1] = new_lines
+    count += len(hits)
+    return len(hits)
+
+def insert_after(anchor, block):
+    global count
+    hits = find_all(anchor)
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx + 1:idx + 1] = block
+    count += len(hits)
+    return len(hits)
+
+def replace_block(start_anchor, new_lines):
+    global count
+    hits = find_all(start_anchor)
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % start_anchor)
+        return 0
+    n = 0
+    for idx in reversed(hits):
+        j = idx
+        depth = 0
+        started = False
+        while j < len(lines):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if "{" in lines[j]:
+                started = True
+            if started and depth == 0:
+                break
+            j += 1
+        if not started or depth != 0:
+            print("!! sepolicy.c block end not found, patch skipped: %s" % start_anchor)
+            continue
+        lines[idx:j + 1] = new_lines
+        count += 1
+        n += 1
+    return n
+
+# (B1) On 4.19 the filename transition key is struct filename_trans
+# (which carries stype); struct filename_trans_key only exists from 5.7.
+insert_after("#define symtab_insert(s, name, datum) hashtab_insert((s)->table, name, datum)",
+             ["/* 4.19: filename transitions use the old struct filename_trans key\n",
+              " * (which carries stype) instead of struct filename_trans_key. */\n",
+              "#define filename_trans_key filename_trans\n"])
+
+# (B2) The 4.19 key also carries the source type.
+replace_lines("key.name = (char *)o;",
+              ["    key.name = (char *)o;\n",
+               "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)\n",
+               "    key.stype = src->value;\n",
+               "#endif\n"])
+
+# (B3) The chain-walk cursor only exists in the new-format code.
+replace_lines("struct filename_trans_datum *last = NULL;",
+              ["#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n",
+               "    struct filename_trans_datum *last = NULL;\n",
+               "#endif\n"])
+
+# (B4) 4.19 has no policydb_filenametr_search; the hashtab is a plain
+# pointer, searched with the 2-arg hashtab_search.
+replace_guarded("struct filename_trans_datum *trans = policydb_filenametr_search(db, &key);",
+                "struct filename_trans_datum *trans = policydb_filenametr_search(db, &key);",
+                "struct filename_trans_datum *trans = hashtab_search(db->filename_trans, &key);",
+                "5, 9, 0")
+
+# (B5) 4.19 has one datum per key, so a hit is a duplicate; there is no
+# stypes bitmap and no next chain to walk.
+replace_block("while (trans) {",
+              ["#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n",
+               "    while (trans) {\n",
+               "        if (ebitmap_get_bit(&trans->stypes, src->value - 1)) {\n",
+               "            // Duplicate, overwrite existing data and return\n",
+               "            trans->otype = def->value;\n",
+               "            return true;\n",
+               "        }\n",
+               "        if (trans->otype == def->value)\n",
+               "            break;\n",
+               "        last = trans;\n",
+               "        trans = trans->next;\n",
+               "    }\n",
+               "#else\n",
+               "    /* 4.19: the key already includes the source type, so a hit\n",
+               "     * is a duplicate; overwrite the default type and return. */\n",
+               "    if (trans) {\n",
+               "        trans->otype = def->value;\n",
+               "        return true;\n",
+               "    }\n",
+               "#endif\n"])
+
+# (B6) No next chain on 4.19.
+replace_lines("trans->next = last;",
+              ["#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n",
+               "        trans->next = last;\n",
+               "#endif\n"])
+
+# (B7) 4.19 hashtab_insert takes (hashtab, key, datum) with a pointer hashtab.
+replace_guarded("rc = hashtab_insert(&db->filename_trans, new_key, trans, filenametr_key_params);",
+                "rc = hashtab_insert(&db->filename_trans, new_key, trans, filenametr_key_params);",
+                "rc = hashtab_insert(db->filename_trans, new_key, trans);",
+                "5, 9, 0")
+
+# (B8) 4.19 has no compat_filename_trans_count and no stypes bitmap;
+# record the transition in the policydb-wide ttypes bitmap instead.
+hits = find_all("db->compat_filename_trans_count++;")
+if not hits:
+    print("!! sepolicy.c anchor not found, patch skipped: db->compat_filename_trans_count++;")
+else:
+    for idx in reversed(hits):
+        if lines[idx + 1].strip() != "return ebitmap_set_bit(&trans->stypes, src->value - 1, 1) == 0;":
+            print("!! sepolicy.c: expected stypes return after compat_filename_trans_count, patch skipped")
+            continue
+        lines[idx:idx + 2] = [
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n",
+            "    db->compat_filename_trans_count++;\n",
+            "    return ebitmap_set_bit(&trans->stypes, src->value - 1, 1) == 0;\n",
+            "#else\n",
+            "    /* 4.19: record that this target type has filename transitions. */\n",
+            "    return ebitmap_set_bit(&db->filename_trans_ttypes, tgt->value, 1) == 0;\n",
+            "#endif\n",
+        ]
+        count += 1
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched sepolicy.c add_filename_trans for 4.19 (%d replacement(s))" % count)
+PYEOF
+fi
+cd ..
