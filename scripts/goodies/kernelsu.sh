@@ -173,6 +173,69 @@ static int ksu_path_mount_419(const char *dev_name, struct path *path,
 PY
 fi
 
+# 5. Patch pkg_observer.c: handle_inode_event() only exists from 5.9, so
+#    ZephyrSU (main) fails on 4.19 with "field designator
+#    'handle_inode_event' does not name a field in struct fsnotify_ops".
+#    On kernels below 5.9, translate the 5.0-era handle_event() callback
+#    into ksu_handle_inode_event() instead.
+if [ -f KernelSU/kernel/manager/pkg_observer.c ]; then
+    echo "-- ZephyrSU: Patching pkg_observer.c for 4.19..."
+    python3 - <<'PY'
+import os
+
+po_path = "KernelSU/kernel/manager/pkg_observer.c"
+if os.path.exists(po_path):
+    with open(po_path, "r") as f:
+        code = f.read()
+    orig = code
+
+    # handle_inode_event() was only added to struct fsnotify_ops in 5.9.
+    # Below 5.9, provide a handle_event() wrapper that builds the qstr
+    # the handler expects from the plain file name string.
+    old_ops = """static const struct fsnotify_ops ksu_ops = {
+\t.handle_inode_event = ksu_handle_inode_event,
+};"""
+    new_ops = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+/* 4.19 compat: handle_inode_event() only exists from 5.9. Translate the
+ * 5.0-era handle_event() callback into ksu_handle_inode_event(). The
+ * file name arrives as a plain string here, not a qstr. */
+static int ksu_handle_event_419(struct fsnotify_group *group,
+\t\t\t\tstruct inode *inode,
+\t\t\t\tu32 mask, const void *data, int data_type,
+\t\t\t\tconst unsigned char *file_name, u32 cookie,
+\t\t\t\tstruct fsnotify_iter_info *iter_info)
+{
+\tstruct qstr name;
+
+\t(void)group;
+\t(void)data;
+\t(void)data_type;
+\t(void)iter_info;
+\tname.name = file_name;
+\tname.len = file_name ? strlen(file_name) : 0;
+\tname.hash = 0;
+\treturn ksu_handle_inode_event(NULL, mask, inode, NULL,
+\t\t\t\t      file_name ? &name : NULL, cookie);
+}
+#endif
+
+static const struct fsnotify_ops ksu_ops = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+\t.handle_inode_event = ksu_handle_inode_event,
+#else
+\t.handle_event = ksu_handle_event_419,
+#endif
+};"""
+    if old_ops in code and new_ops not in code:
+        code = code.replace(old_ops, new_ops, 1)
+
+    if code != orig:
+        with open(po_path, "w") as f:
+            f.write(code)
+        print("   -> Patched pkg_observer.c for 4.19 (handle_event wrapper)")
+PY
+fi
+
 # Enable ZephyrSU & Kprobes Configs (Non-GKI Requirements)
 echo "-- ZephyrSU: Enabling Non-GKI configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
