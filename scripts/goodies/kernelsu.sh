@@ -1146,3 +1146,53 @@ print(" -> Patched sepolicy.c add_filename_trans for 4.19 (%d replacement(s))" %
 PYEOF
 fi
 cd ..
+
+
+# 15. Guard the add_type plain-array block to kernels >= 5.7
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/sepolicy.c" ]; then
+python3 - "KernelSU/kernel/selinux/sepolicy.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+
+count = 0
+
+def insert_before(anchor, block):
+    global count
+    hits = [i for i, line in enumerate(lines) if line.strip() == anchor]
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx:idx] = block
+    count += len(hits)
+    return len(hits)
+
+def insert_after(anchor, block):
+    global count
+    hits = [i for i, line in enumerate(lines) if line.strip() == anchor]
+    if not hits:
+        print("!! sepolicy.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx + 1:idx + 1] = block
+    count += len(hits)
+    return len(hits)
+
+# The plain-array kvrealloc block only compiles on 5.7+; on 4.19 the
+# flex_array block above returns early, but the compiler still parses
+# this block, so it must be excluded from compilation.
+insert_before("struct ebitmap *new_type_attr_map_array =",
+              ["#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)\n"])
+insert_after("db->sym_val_to_name[SYM_TYPES][value - 1] = key;",
+             ["#endif\n"])
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched sepolicy.c add_type plain-array guard for 4.19 (%d insertion(s))" % count)
+PYEOF
+fi
+cd ..
