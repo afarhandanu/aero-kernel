@@ -67,6 +67,49 @@ if os.path.exists(fw_path):
 PY
 fi
 
+# 3. Patch seccomp_cache.c: SECCOMP_ARCH_NATIVE_NR / SECCOMP_ARCH_COMPAT_NR
+#    were only added to the kernel after 4.19, so ZephyrSU (main) fails to
+#    compile on 4.19 with "use of undeclared identifier
+#    'SECCOMP_ARCH_NATIVE_NR'". Backport the newer arm64 definitions,
+#    using the 4.19 names NR_syscalls and __NR_compat_syscalls.
+if [ -f KernelSU/kernel/infra/seccomp_cache.c ]; then
+    echo "-- ZephyrSU: Patching seccomp_cache.c for 4.19..."
+    python3 - <<'PY'
+import os
+
+sc_path = "KernelSU/kernel/infra/seccomp_cache.c"
+if os.path.exists(sc_path):
+    with open(sc_path, "r") as f:
+        code = f.read()
+    if "SECCOMP_ARCH_NATIVE_NR" in code and "#ifndef SECCOMP_ARCH_NATIVE_NR" not in code:
+        anchor = '#include "infra/seccomp_cache.h"'
+        compat = anchor + """
+
+/* 4.19 compat: SECCOMP_ARCH_*_NR do not exist before 5.x. */
+#include <linux/audit.h>
+#include <asm/unistd.h>
+#ifndef SECCOMP_ARCH_NATIVE
+#define SECCOMP_ARCH_NATIVE AUDIT_ARCH_AARCH64
+#endif
+#ifndef SECCOMP_ARCH_NATIVE_NR
+#define SECCOMP_ARCH_NATIVE_NR NR_syscalls
+#endif
+#ifdef CONFIG_COMPAT
+#ifndef SECCOMP_ARCH_COMPAT
+#define SECCOMP_ARCH_COMPAT AUDIT_ARCH_ARM
+#endif
+#ifndef SECCOMP_ARCH_COMPAT_NR
+#define SECCOMP_ARCH_COMPAT_NR __NR_compat_syscalls
+#endif
+#endif
+"""
+        code = code.replace(anchor, compat, 1)
+        with open(sc_path, "w") as f:
+            f.write(code)
+        print("   -> Defined SECCOMP_ARCH_NATIVE_NR / SECCOMP_ARCH_COMPAT_NR for 4.19")
+PY
+fi
+
 # Enable ZephyrSU & Kprobes Configs (Non-GKI Requirements)
 echo "-- ZephyrSU: Enabling Non-GKI configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
@@ -83,7 +126,7 @@ echo "CONFIG_KSU_MANUAL_SU=y" >> "$FINAL_DEFCONFIG"
 
 # Pre-install UAPI headers for preinit_runner if needed
 if [ -f KernelSU/kernel/tools/code_generation/preinit_runner/preinit_runner.mk ] &&
-   grep -q '^CONFIG_HEADERS_INSTALL=y' "$FINAL_DEFCONFIG"; then
+    grep -q '^CONFIG_HEADERS_INSTALL=y' "$FINAL_DEFCONFIG"; then
     echo "-- ZephyrSU: Pre-installing UAPI headers for preinit..."
     if ! make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" headers > headers.log 2>&1; then
         echo "-- ZephyrSU: UAPI header pre-install failed"
@@ -113,5 +156,4 @@ unstatic "security/selinux/hooks.c" "struct security_operations selinux_ops"
 unstatic "security/selinux/hooks.c" "int inode_doinit_with_dentry"
 unstatic "security/selinux/ss/services.c" "void security_dump_masked_av"
 unstatic "security/selinux/ss/services.c" "void context_struct_compute_av"
-
 cd ..
