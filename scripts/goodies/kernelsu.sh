@@ -85,6 +85,7 @@ if os.path.exists(sc_path):
         anchor = '#include "infra/seccomp_cache.h"'
         compat = anchor + """
 
+
 /* 4.19 compat: SECCOMP_ARCH_*_NR do not exist before 5.x. */
 #include <linux/audit.h>
 #include <asm/unistd.h>
@@ -110,6 +111,68 @@ if os.path.exists(sc_path):
 PY
 fi
 
+# 4. Patch su_mount_ns.c: <uapi/linux/mount.h> and path_mount() only exist
+#    from 5.0, so ZephyrSU (main) fails on 4.19 with "fatal error:
+#    'uapi/linux/mount.h' file not found". Guard the include and provide
+#    path_mount() for 4.19 via do_mount() run under KERNEL_DS.
+if [ -f KernelSU/kernel/infra/su_mount_ns.c ]; then
+    echo "-- ZephyrSU: Patching su_mount_ns.c for 4.19..."
+    python3 - <<'PY'
+import os
+
+mn_path = "KernelSU/kernel/infra/su_mount_ns.c"
+if os.path.exists(mn_path):
+    with open(mn_path, "r") as f:
+        code = f.read()
+    orig = code
+
+    # (a) The uapi mount header only exists from 5.0.
+    old_inc = "#include <uapi/linux/mount.h>"
+    new_inc = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n"
+               "#include <uapi/linux/mount.h>\n"
+               "#endif")
+    if old_inc in code and new_inc not in code:
+        code = code.replace(old_inc, new_inc, 1)
+
+    # (b) path_mount() does not exist before 5.0. Provide a 4.19
+    #     equivalent that makes the root mount private via do_mount(),
+    #     which takes a user-space path string, so it runs under
+    #     KERNEL_DS. The only caller passes the filesystem root, so
+    #     "/" is the same mountpoint path_mount() would have used.
+    #     The call site is left untouched: the macro below redirects
+    #     path_mount() to the helper on kernels below 5.0.
+    anchor = "// global mode , need CAP_SYS_ADMIN and CAP_SYS_CHROOT to perform setns"
+    helper = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+#include <linux/uaccess.h>
+/* 4.19 compat: path_mount() only exists from 5.0. do_mount() takes a
+ * user-space path string, so run it with KERNEL_DS to pass "/". */
+static int ksu_path_mount_419(const char *dev_name, struct path *path,
+\t\t\t      const char *type_page, unsigned long flags,
+\t\t\t      void *data_page)
+{
+\tmm_segment_t old_fs = get_fs();
+\tint ret;
+
+\t(void)path;
+\tset_fs(KERNEL_DS);
+\tret = (int)do_mount(dev_name, "/", type_page, flags, data_page);
+\tset_fs(old_fs);
+\treturn ret;
+}
+#define path_mount ksu_path_mount_419
+#endif
+
+"""
+    if anchor in code and "ksu_path_mount_419" not in code:
+        code = code.replace(anchor, helper + anchor, 1)
+
+    if code != orig:
+        with open(mn_path, "w") as f:
+            f.write(code)
+        print("   -> Patched su_mount_ns.c for 4.19 (path_mount via do_mount)")
+PY
+fi
+
 # Enable ZephyrSU & Kprobes Configs (Non-GKI Requirements)
 echo "-- ZephyrSU: Enabling Non-GKI configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
@@ -126,7 +189,7 @@ echo "CONFIG_KSU_MANUAL_SU=y" >> "$FINAL_DEFCONFIG"
 
 # Pre-install UAPI headers for preinit_runner if needed
 if [ -f KernelSU/kernel/tools/code_generation/preinit_runner/preinit_runner.mk ] &&
-    grep -q '^CONFIG_HEADERS_INSTALL=y' "$FINAL_DEFCONFIG"; then
+   grep -q '^CONFIG_HEADERS_INSTALL=y' "$FINAL_DEFCONFIG"; then
     echo "-- ZephyrSU: Pre-installing UAPI headers for preinit..."
     if ! make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" headers > headers.log 2>&1; then
         echo "-- ZephyrSU: UAPI header pre-install failed"
@@ -156,4 +219,5 @@ unstatic "security/selinux/hooks.c" "struct security_operations selinux_ops"
 unstatic "security/selinux/hooks.c" "int inode_doinit_with_dentry"
 unstatic "security/selinux/ss/services.c" "void security_dump_masked_av"
 unstatic "security/selinux/ss/services.c" "void context_struct_compute_av"
+
 cd ..
