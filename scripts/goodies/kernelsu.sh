@@ -192,7 +192,12 @@ if os.path.exists(po_path):
     # handle_inode_event() was only added to struct fsnotify_ops in 5.9.
     # Below 5.9, provide a handle_event() wrapper that builds the qstr
     # the handler expects from the plain file name string.
+    # This file is indented with 4 spaces, not tabs.
     old_ops = """static const struct fsnotify_ops ksu_ops = {
+    .handle_inode_event = ksu_handle_inode_event,
+};"""
+    if old_ops not in code:
+        old_ops = """static const struct fsnotify_ops ksu_ops = {
 \t.handle_inode_event = ksu_handle_inode_event,
 };"""
     new_ops = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
@@ -200,34 +205,36 @@ if os.path.exists(po_path):
  * 5.0-era handle_event() callback into ksu_handle_inode_event(). The
  * file name arrives as a plain string here, not a qstr. */
 static int ksu_handle_event_419(struct fsnotify_group *group,
-\t\t\t\tstruct inode *inode,
-\t\t\t\tu32 mask, const void *data, int data_type,
-\t\t\t\tconst unsigned char *file_name, u32 cookie,
-\t\t\t\tstruct fsnotify_iter_info *iter_info)
+        struct inode *inode,
+        u32 mask, const void *data, int data_type,
+        const unsigned char *file_name, u32 cookie,
+        struct fsnotify_iter_info *iter_info)
 {
-\tstruct qstr name;
+    struct qstr name;
 
-\t(void)group;
-\t(void)data;
-\t(void)data_type;
-\t(void)iter_info;
-\tname.name = file_name;
-\tname.len = file_name ? strlen(file_name) : 0;
-\tname.hash = 0;
-\treturn ksu_handle_inode_event(NULL, mask, inode, NULL,
-\t\t\t\t      file_name ? &name : NULL, cookie);
+    (void)group;
+    (void)data;
+    (void)data_type;
+    (void)iter_info;
+    name.name = file_name;
+    name.len = file_name ? strlen(file_name) : 0;
+    name.hash = 0;
+    return ksu_handle_inode_event(NULL, mask, inode, NULL,
+        file_name ? &name : NULL, cookie);
 }
 #endif
 
 static const struct fsnotify_ops ksu_ops = {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-\t.handle_inode_event = ksu_handle_inode_event,
+    .handle_inode_event = ksu_handle_inode_event,
 #else
-\t.handle_event = ksu_handle_event_419,
+    .handle_event = ksu_handle_event_419,
 #endif
 };"""
     if old_ops in code and new_ops not in code:
         code = code.replace(old_ops, new_ops, 1)
+    elif "ksu_handle_event_419" not in code:
+        print("   !! pkg_observer.c anchor not found, patch skipped")
 
     if code != orig:
         with open(po_path, "w") as f:
