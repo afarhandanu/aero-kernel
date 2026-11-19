@@ -12,6 +12,23 @@ curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$KSU_SETUP_
     exit 1
 }
 
+# Fix MODULE_IMPORT_NS compatibility in ZephyrSU for kernels < 5.4 (such as 4.19)
+if [ -f KernelSU/kernel/core/init.c ]; then
+    echo "-- ZephyrSU: Patching MODULE_IMPORT_NS compatibility for kernel $KERNEL_VERSION..."
+    python3 - <<'PY'
+path = "KernelSU/kernel/core/init.c"
+with open(path, "r") as f:
+    code = f.read()
+target = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
+replacement = "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)"
+if target in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)" not in code:
+    code = code.replace(target, replacement, 1) + "\n#endif\n"
+    with open(path, "w") as f:
+        f.write(code)
+    print("   -> Wrapped MODULE_IMPORT_NS in LINUX_VERSION_CODE >= 5.4.0")
+PY
+fi
+
 # Enable ZephyrSU & Kprobes Configs
 echo "-- ZephyrSU: Enabling configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
