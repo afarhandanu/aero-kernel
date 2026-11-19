@@ -343,3 +343,51 @@ for sp_path in ["KernelSU/kernel/policy/allowlist.c",
 PY
 fi
 cd ..
+
+
+# 7. Patch app_profile.c for kernels < 5.9: struct seccomp only gained
+#    filter_count, and seccomp_filter_release() only appeared, in 5.9,
+#    so guard the filter_count reset and use put_seccomp_filter() below 5.9.
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/policy/app_profile.c" ]; then
+    echo "-- ZephyrSU: Patching app_profile.c for 4.19..."
+    python3 - "$KERNEL_DIR/KernelSU/kernel/policy/app_profile.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+orig = src
+
+# filter_count only exists in struct seccomp from 5.9
+anchor = "    atomic_set(&current->seccomp.filter_count, 0);\n"
+replacement = (
+    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+    "    atomic_set(&current->seccomp.filter_count, 0);\n"
+    "#endif\n"
+)
+if anchor in src:
+    src = src.replace(anchor, replacement, 1)
+    print(" -> Patched app_profile.c for 4.19 (filter_count guard)")
+else:
+    print("!! app_profile.c filter_count anchor not found, patch skipped")
+
+# seccomp_filter_release() only exists from 5.9; below that, the same
+# filter reference is dropped with put_seccomp_filter().
+anchor2 = "    seccomp_filter_release(fake);\n"
+replacement2 = (
+    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+    "    seccomp_filter_release(fake);\n"
+    "#else\n"
+    "    put_seccomp_filter(fake);\n"
+    "#endif\n"
+)
+if anchor2 in src:
+    src = src.replace(anchor2, replacement2, 1)
+    print(" -> Patched app_profile.c for 4.19 (put_seccomp_filter)")
+else:
+    print("!! app_profile.c seccomp_filter_release anchor not found, patch skipped")
+
+if src != orig:
+    open(path, "w").write(src)
+PYEOF
+fi
+cd ..
