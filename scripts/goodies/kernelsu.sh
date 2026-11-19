@@ -29,14 +29,18 @@ if target in code and "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)" not in
 PY
 fi
 
-# Enable ZephyrSU & Kprobes Configs
-echo "-- ZephyrSU: Enabling configs..."
+# Enable ZephyrSU & Kprobes Configs (Non-GKI Requirements)
+echo "-- ZephyrSU: Enabling Non-GKI configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_KPROBES=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_HAVE_KPROBES=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_KPROBE_EVENTS=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_KRETPROBES=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_THREAD_INFO_IN_TASK=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_KALLSYMS=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_KALLSYMS_ALL=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_EXT4_FS=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_KSU_MANUAL_SU=y" >> "$FINAL_DEFCONFIG"
 
 # Pre-install UAPI headers for preinit_runner if needed
