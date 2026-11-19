@@ -711,3 +711,92 @@ print(" -> Patched rules.c anchors for 4.19 (indent-independent, %d replacement(
 PYEOF
     cd ..
 fi
+
+
+# 11. Fix rules.c install blocks for 4.19 (blank line in the block)
+# Patch #10's install-block match expected the four statements to be
+# consecutive, but rules.c has a blank line between
+# ksu_destroy_sepolicy(old_pol); and reset_avc_cache(...), so neither
+# block matched (the build log shows "install block at line ... not
+# replaced (after: reset_avc_cache(...)"). Redo only the two install
+# blocks, collecting the next four non-blank lines so a blank line
+# anywhere in the block does not matter. The other six replacements
+# from patch #10 already apply and are not repeated.
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/rules.c" ]; then
+    echo "-- ZephyrSU: Patching rules.c install blocks for 4.19 (blank-tolerant)..."
+    python3 - "KernelSU/kernel/selinux/rules.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.read().splitlines(keepends=True)
+
+out = []
+patched = 0
+warned = []
+
+i = 0
+while i < len(lines):
+    line = lines[i]
+    stripped = line.strip()
+    ind = line[:len(line) - len(line.lstrip())]
+
+    if stripped == "rcu_assign_pointer(selinux_state.policy, pol);":
+        idx = []
+        j = i
+        while j < len(lines) and len(idx) < 4:
+            if lines[j].strip() != "":
+                idx.append(j)
+            j += 1
+        block = [lines[k].strip() for k in idx]
+        expected = [
+            "rcu_assign_pointer(selinux_state.policy, pol);",
+            "synchronize_rcu();",
+            "ksu_destroy_sepolicy(old_pol);",
+            "reset_avc_cache(pol->latest_granting);",
+        ]
+        after = ""
+        k = j
+        while k < len(lines):
+            if lines[k].strip() != "":
+                after = lines[k].strip()
+                break
+            k += 1
+        if block == expected and after in ("out_unlock:", "ret = success_cmd_count;"):
+            out.append("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n")
+            out.append(ind + "rcu_assign_pointer(selinux_state.policy, pol);\n")
+            out.append(ind + "synchronize_rcu();\n")
+            out.append(ind + "ksu_destroy_sepolicy(old_pol);\n")
+            out.append(ind + "reset_avc_cache(pol->latest_granting);\n")
+            out.append("#else\n")
+            if after == "out_unlock:":
+                out.append(ind + "if (!ksu_install_selinux_policy_419(pol)) goto out_unlock;\n")
+            else:
+                out.append(ind + "if (!ksu_install_selinux_policy_419(pol)) {\n")
+                out.append(ind + "    ret = -ENOMEM;\n")
+                out.append(ind + "    goto out_unlock;\n")
+                out.append(ind + "}\n")
+            out.append("#endif\n")
+            patched += 1
+            i = idx[-1] + 1
+            continue
+        warned.append("install block at line %d not replaced (after: %s)" % (i + 1, after))
+        out.append(line)
+        i += 1
+        continue
+
+    out.append(line)
+    i += 1
+
+with open(path, "w") as f:
+    f.writelines(out)
+
+for w in warned:
+    print("!! rules.c (patch #11): " + w)
+if patched != 2:
+    print("!! rules.c (patch #11): expected 2 install block(s), got %d" % patched)
+print(" -> Patched rules.c install blocks for 4.19 (blank-tolerant, %d replacement(s))" % patched)
+PYEOF
+    cd ..
+fi
