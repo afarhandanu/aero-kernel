@@ -1230,3 +1230,24 @@ print(" -> Patched sulog/event.c for 4.19 (minmax.h -> kernel.h, %d replacement(
 PYEOF
 fi
 cd ..
+
+
+# 17. Patch supercall/dispatch.c missing sched includes on 4.19
+echo "-- ZephyrSU: Patching supercall/dispatch.c for 4.19..."
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/supercall/dispatch.c" ]; then
+python3 - "KernelSU/kernel/supercall/dispatch.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+anchor = "#include <linux/capability.h>"
+addition = anchor + "\n// 4.19: linux/sched.h does not pull in sched/signal.h or sched/task.h,\n// so task_pgrp()/task_session() (signal.h) and tasklist_lock/init_task\n// (task.h) are undeclared without these explicit includes.\n#include <linux/sched.h>\n#include <linux/sched/signal.h>\n#include <linux/sched/task.h>"
+if anchor in src:
+    src = src.replace(anchor, addition, 1)
+    open(path, "w").write(src)
+    print(" -> Patched supercall/dispatch.c for 4.19 (sched/signal.h + sched/task.h, 1 replacement(s))")
+else:
+    print("!! supercall/dispatch.c anchor not found, patch skipped")
+PYEOF
+fi
+cd..
