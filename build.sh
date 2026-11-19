@@ -132,10 +132,10 @@ if ! "$CLANG_ROOT/bin/ld.lld" --version &> /dev/null; then
     exit 1
 fi
 export PATH
-echo "-- Compiler: $("$CLANG_ROOT/bin/clang" --version | head -n 1)"
+echo "-- Compiler: $("$CLANG_ROOT/bin/clang" --version 2>/dev/null | head -n 1)"
 
 if command -v ccache &> /dev/null; then
-    CLANG_ID="$("$CLANG_ROOT/bin/clang" --version | head -n 1)"
+    CLANG_ID="$("$CLANG_ROOT/bin/clang" --version 2>/dev/null | head -n 1)"
     if [ -f scripts/gcc-wrapper.py ]; then
         KERNEL_CC="ccache $PWD/scripts/gcc-wrapper.py clang"
         WRAPPER_ID="$(sha256sum scripts/gcc-wrapper.py | cut -d' ' -f1)"
