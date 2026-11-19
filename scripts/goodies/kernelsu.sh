@@ -441,3 +441,167 @@ if src != orig:
 PYEOF
 fi
 cd ..
+
+
+# 9. Patch selinux_policy / selinux_state.policy for kernels < 5.10 (such as 4.19).
+#    Before 5.10 the live SELinux policy lives in struct selinux_ss
+#    (selinux_state.ss, guarded by policy_rwlock) instead of struct selinux_policy
+#    (selinux_state.policy, guarded by policy_mutex). Alias the type in sepolicy.h
+#    and install the duplicated policy by content in rules.c, as security_load_policy does.
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/selinux/sepolicy.h" ]; then
+python3 - "KernelSU/kernel/selinux/sepolicy.h" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+anchor = '#include "ss/policydb.h"'
+alias = anchor + '\n\n#include <linux/version.h>\n\n/* Kernels before 5.10 keep the live SELinux policy in struct selinux_ss\n * (selinux_state.ss, guarded by policy_rwlock) instead of\n * struct selinux_policy (selinux_state.policy, guarded by policy_mutex).\n * Alias the type so the code below works with both layouts. */\n#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)\n#define selinux_policy selinux_ss\n#endif'
+if anchor in src:
+    if 'selinux_policy selinux_ss' not in src:
+        src = src.replace(anchor, alias, 1)
+        open(path, 'w').write(src)
+        print(" -> Patched sepolicy.h for 4.19 (selinux_policy -> selinux_ss alias)")
+    else:
+        print(" -> sepolicy.h already has the selinux_ss alias, skipping")
+else:
+    print("!! sepolicy.h anchor not found, patch skipped")
+PYEOF
+fi
+if [ -f "KernelSU/kernel/selinux/rules.c" ]; then
+python3 - "KernelSU/kernel/selinux/rules.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+# spinlock.h for write_lock_irq() used by the 4.19 install helper
+anchor = '#include <linux/slab.h>'
+if anchor in src and '#include <linux/spinlock.h>' not in src:
+    src = src.replace(anchor, anchor + '\n#include <linux/spinlock.h>', 1)
+elif '#include <linux/spinlock.h>' not in src:
+    print("!! rules.c slab.h anchor not found, spinlock include skipped")
+
+# 4.19 install helper, inserted before apply_kernelsu_rules()
+helper = '''#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+/* Install a duplicated policy on kernels before 5.10, where the live
+ * policy lives in selinux_state.ss (struct selinux_ss) instead of
+ * selinux_state.policy. Mirrors security_load_policy(): the new
+ * policydb/sidtab/latest_granting are swapped in under the ss write
+ * lock, then the old policydb is destroyed. The duplicated container
+ * itself is freed; its policydb was moved into the live policy. */
+static bool ksu_install_selinux_policy_419(struct selinux_policy *pol)
+{
+\tstruct policydb *old_db;
+\tu32 seqno;
+
+\told_db = kzalloc(sizeof(*old_db), GFP_KERNEL);
+\tif (!old_db) {
+\t\tpr_err("failed to alloc old policydb for policy install");
+\t\tksu_destroy_sepolicy(pol);
+\t\treturn false;
+\t}
+\tmemcpy(old_db, &selinux_state.ss->policydb, sizeof(*old_db));
+\twrite_lock_irq(&selinux_state.ss->policy_rwlock);
+\tmemcpy(&selinux_state.ss->policydb, &pol->policydb, sizeof(struct policydb));
+\tselinux_state.ss->sidtab = pol->sidtab;
+\tselinux_state.ss->latest_granting = pol->latest_granting;
+\twrite_unlock_irq(&selinux_state.ss->policy_rwlock);
+\tpolicydb_destroy(old_db);
+\tkfree(old_db);
+\tseqno = pol->latest_granting;
+\tkfree(pol);
+\treset_avc_cache(seqno);
+\treturn true;
+}
+#endif
+
+'''
+if 'ksu_install_selinux_policy_419' not in src:
+    if src.count('void apply_kernelsu_rules()') == 1:
+        src = src.replace('void apply_kernelsu_rules()', helper + 'void apply_kernelsu_rules()', 1)
+    else:
+        print("!! rules.c apply_kernelsu_rules anchor not found, helper skipped")
+
+def guarded(src, old, new):
+    if old not in src:
+        print("!! rules.c anchor not found, patch skipped: " + old[:60])
+        return src
+    return src.replace(old, new)
+
+# mutex_lock (both functions; on 4.19 the prep work runs unlocked, as in security_load_policy)
+old = '\tmutex_lock(&selinux_state.policy_mutex);'
+new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n' + old + '\n#endif'
+src = guarded(src, old, new)
+
+# old policy pointer (both functions)
+old = '\told_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));'
+new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n' + old + '\n#else\n\told_pol = selinux_state.ss;\n#endif'
+src = guarded(src, old, new)
+
+# mutex_unlock (both functions; the empty statement keeps the out_unlock label valid on 4.19)
+old = '\tmutex_unlock(&selinux_state.policy_mutex);'
+new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n' + old + '\n#else\n\t;\n#endif'
+src = guarded(src, old, new)
+
+# install block in apply_kernelsu_rules (followed by out_unlock:)
+old = '\trcu_assign_pointer(selinux_state.policy, pol);\n\tsynchronize_rcu();\n\tksu_destroy_sepolicy(old_pol);\n\treset_avc_cache(pol->latest_granting);\nout_unlock:'
+new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n\trcu_assign_pointer(selinux_state.policy, pol);\n\tsynchronize_rcu();\n\tksu_destroy_sepolicy(old_pol);\n\treset_avc_cache(pol->latest_granting);\n#else\n\tif (!ksu_install_selinux_policy_419(pol))\n\t\tgoto out_unlock;\n#endif\nout_unlock:'
+src = guarded(src, old, new)
+
+# install block in handle_sepolicy (followed by ret = success_cmd_count;)
+old = '\trcu_assign_pointer(selinux_state.policy, pol);\n\tsynchronize_rcu();\n\tksu_destroy_sepolicy(old_pol);\n\treset_avc_cache(pol->latest_granting);\n\tret = success_cmd_count;'
+new = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n\trcu_assign_pointer(selinux_state.policy, pol);\n\tsynchronize_rcu();\n\tksu_destroy_sepolicy(old_pol);\n\treset_avc_cache(pol->latest_granting);\n#else\n\tif (!ksu_install_selinux_policy_419(pol)) {\n\t\tret = -ENOMEM;\n\t\tgoto out_unlock;\n\t}\n#endif\n\tret = success_cmd_count;'
+src = guarded(src, old, new)
+
+open(path, 'w').write(src)
+print(" -> Patched rules.c for 4.19 (selinux_ss policy install)")
+PYEOF
+fi
+cd ..
+
+# 9 (continued). Patch selinux_hide.c for kernels < 5.10 / < 5.7:
+#    the live policy is selinux_state.ss (not selinux_state.policy) below 5.10,
+#    and the status page and its lock live in selinux_ss below 5.7.
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/feature/selinux_hide.c" ]; then
+python3 - "KernelSU/kernel/feature/selinux_hide.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+lines = src.split('\n')
+out = []
+patched = 0
+# (stripped line, 4.19 replacement line, kernel version the new layout needs)
+guard = [
+    ('orig_policy = rcu_dereference(selinux_state.policy);', 'orig_policy = selinux_state.ss;', '5, 10, 0'),
+    ('policy = rcu_dereference(selinux_state.policy);', 'policy = selinux_state.ss;', '5, 10, 0'),
+    ('mutex_lock(&selinux_state.status_lock);', 'mutex_lock(&selinux_state.ss->status_lock);', '5, 7, 0'),
+    ('mutex_unlock(&selinux_state.status_lock);', 'mutex_unlock(&selinux_state.ss->status_lock);', '5, 7, 0'),
+    ('if (!selinux_state.status_page) {', 'if (!selinux_state.ss->status_page) {', '5, 7, 0'),
+    ('struct selinux_kernel_status *status = page_address(selinux_state.status_page);', 'struct selinux_kernel_status *status = page_address(selinux_state.ss->status_page);', '5, 7, 0'),
+]
+for ln in lines:
+    stripped = ln.strip()
+    hit = None
+    for old, new, ver in guard:
+        if stripped == old:
+            hit = (new, ver)
+            break
+    if hit:
+        new, ver = hit
+        indent = ln[:len(ln) - len(ln.lstrip())]
+        out.append('#if LINUX_VERSION_CODE >= KERNEL_VERSION(' + ver + ')')
+        out.append(ln)
+        out.append('#else')
+        out.append(indent + new)
+        out.append('#endif')
+        patched += 1
+    else:
+        out.append(ln)
+if patched == 0:
+    print("!! selinux_hide.c anchors not found, patch skipped")
+else:
+    open(path, 'w').write('\n'.join(out))
+    print(" -> Patched selinux_hide.c for 4.19 (selinux_ss policy/status, %d line(s))" % patched)
+PYEOF
+fi
+cd ..
