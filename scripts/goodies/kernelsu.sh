@@ -1251,3 +1251,167 @@ else:
 PYEOF
 fi
 cd..
+
+
+# 18. Patch feature/selinux_hide.c for 4.19: the SELinux sidtab/policydb
+#    rework (5.7/5.9) means symtab_search(), struct sidtab_entry and the
+#    sid2str cache do not exist on 4.19, and the policydb type maps are
+#    flex_arrays (type_val_to_struct_array / type_attr_map_array) instead
+#    of plain arrays. Provide a 4.19 symtab_search() over the hashtab, a
+#    context-based sidtab_entry_to_string(), and flex_array accessors.
+echo "-- ZephyrSU: Patching feature/selinux_hide.c for 4.19..."
+cd "$KERNEL_DIR"
+if [ -f "KernelSU/kernel/feature/selinux_hide.c" ]; then
+python3 - "KernelSU/kernel/feature/selinux_hide.c" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+count = 0
+
+def find_all(anchor):
+    return [i for i, line in enumerate(lines) if line.strip() == anchor]
+
+def replace_guarded(anchor, old_text, new_text, ver):
+    global count
+    hits = find_all(anchor)
+    if not hits:
+        print("!! selinux_hide.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        ind = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+        lines[idx:idx + 1] = [
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(%s)\n" % ver,
+            ind + old_text + "\n",
+            "#else\n",
+            ind + new_text + "\n",
+            "#endif\n",
+        ]
+    count += len(hits)
+    return len(hits)
+
+def insert_before(anchor, block):
+    global count
+    hits = find_all(anchor)
+    if not hits:
+        print("!! selinux_hide.c anchor not found, patch skipped: %s" % anchor)
+        return 0
+    for idx in reversed(hits):
+        lines[idx:idx] = block
+    count += len(hits)
+    return len(hits)
+
+def replace_block(start_anchor, new_lines):
+    global count
+    hits = find_all(start_anchor)
+    if not hits:
+        print("!! selinux_hide.c anchor not found, patch skipped: %s" % start_anchor)
+        return 0
+    n = 0
+    for idx in reversed(hits):
+        j = idx
+        depth = 0
+        started = False
+        while j < len(lines):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if "{" in lines[j]:
+                started = True
+            if started and depth == 0:
+                break
+            j += 1
+        if not started or depth != 0:
+            print("!! selinux_hide.c block end not found, patch skipped: %s" % start_anchor)
+            continue
+        lines[idx:j + 1] = new_lines
+        count += 1
+        n += 1
+    return n
+
+# (A) 4.19 symtab_search(): added in 5.9, and struct symtab still holds its
+# hashtab by pointer here. Look the name up in the underlying hashtab
+# directly, so the existing symtab_search() call sites keep working.
+compat = [
+    "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)\n",
+    "/* 4.19: symtab_search() was only added in 5.9, and struct symtab still\n",
+    " * holds its hashtab by pointer here. Look the name up in the underlying\n",
+    " * hashtab directly, so the existing symtab_search() call sites keep\n",
+    " * working unchanged. */\n",
+    '#include "ss/hashtab.h"\n',
+    "\n",
+    "static inline void *ksu_symtab_search(struct symtab *s, const char *name)\n",
+    "{\n",
+    "    return hashtab_search(s->table, name);\n",
+    "}\n",
+    "#define symtab_search ksu_symtab_search\n",
+    "#endif\n",
+    "\n",
+]
+insert_before("static ssize_t my_write_context(struct file *file, char *buf, size_t size)", compat)
+
+# (B) sidtab_entry_to_string(): struct sidtab_entry, sidtab_sid2str_get()
+# and sidtab_sid2str_put() only exist from 5.7. On 4.19 the sidtab stores
+# struct context directly, so convert it straight away.
+new_func = [
+    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)\n",
+    "static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, struct sidtab_entry *entry,\n",
+    "                                  char **scontext, u32 *scontext_len)\n",
+    "{\n",
+    "    int rc = sidtab_sid2str_get(sidtab, entry, scontext, scontext_len);\n",
+    "\n",
+    "    if (rc != -ENOENT)\n",
+    "        return rc;\n",
+    "\n",
+    "    rc = context_struct_to_string(p, &entry->context, scontext, scontext_len);\n",
+    "    if (!rc && scontext)\n",
+    "        sidtab_sid2str_put(sidtab, entry, *scontext, *scontext_len);\n",
+    "    return rc;\n",
+    "}\n",
+    "#else\n",
+    "/* 4.19: there is no struct sidtab_entry and no sid2str cache; the sidtab\n",
+    " * stores struct context directly, so convert it straight away. */\n",
+    "static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, struct context *entry,\n",
+    "                                  char **scontext, u32 *scontext_len)\n",
+    "{\n",
+    "    return context_struct_to_string(p, entry, scontext, scontext_len);\n",
+    "}\n",
+    "#endif\n",
+]
+replace_block("static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, struct sidtab_entry *entry,", new_func)
+
+# (C) security_sid_to_context_with_policy(): sidtab_search_entry() only
+# exists from 5.7; on 4.19 sidtab_search() returns the struct context.
+replace_guarded("struct sidtab_entry *entry;",
+                "struct sidtab_entry *entry;",
+                "struct context *entry;",
+                "5, 7, 0")
+replace_guarded("entry = sidtab_search_entry(sidtab, sid);",
+                "entry = sidtab_search_entry(sidtab, sid);",
+                "entry = sidtab_search(sidtab, sid);",
+                "5, 7, 0")
+
+# (D) type_attribute_bounds_av(): on 4.19 the type map is a flex_array.
+replace_guarded("source = policydb->type_val_to_struct[scontext->type - 1];",
+                "source = policydb->type_val_to_struct[scontext->type - 1];",
+                "source = flex_array_get_ptr(policydb->type_val_to_struct_array, scontext->type - 1);",
+                "5, 7, 0")
+replace_guarded("target = policydb->type_val_to_struct[tcontext->type - 1];",
+                "target = policydb->type_val_to_struct[tcontext->type - 1];",
+                "target = flex_array_get_ptr(policydb->type_val_to_struct_array, tcontext->type - 1);",
+                "5, 7, 0")
+
+# (E) context_struct_compute_av(): on 4.19 the attr map is a flex_array.
+replace_guarded("sattr = &policydb->type_attr_map_array[scontext->type - 1];",
+                "sattr = &policydb->type_attr_map_array[scontext->type - 1];",
+                "sattr = flex_array_get(policydb->type_attr_map_array, scontext->type - 1);",
+                "5, 7, 0")
+replace_guarded("tattr = &policydb->type_attr_map_array[tcontext->type - 1];",
+                "tattr = &policydb->type_attr_map_array[tcontext->type - 1];",
+                "tattr = flex_array_get(policydb->type_attr_map_array, tcontext->type - 1);",
+                "5, 7, 0")
+
+with open(path, "w") as f:
+    f.writelines(lines)
+print(" -> Patched feature/selinux_hide.c for 4.19 (%d replacement(s))" % count)
+PYEOF
+fi
+cd ..
