@@ -9,10 +9,10 @@ on:
         type: string
         default: 'mi89x7:mithorium'
       ksu_enabled:
-      description: Enable ZephyrSU
-      required: false
-      type: boolean
-      default: true
+          description: Enable ZephyrSU
+          required: false
+          type: boolean
+        default: true
 
 jobs:
   setup:
