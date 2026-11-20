@@ -21,6 +21,11 @@ on:
         required: false
         type: number
         default: 14
+      ksu_enabled:
+      description: Enable ZephyrSU
+      required: false
+      type: boolean
+      default: true
 
 jobs:
   build:
@@ -69,6 +74,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILD_DATE: ${{ inputs.build_date }}
           BUILD_TYPE: ${{ inputs.build_type }}
+          KSU_ENABLED: ${{ inputs.ksu_enabled }}
         run: |
           chmod +x build.sh
           ./build.sh "${{ inputs.device }}" "${{ inputs.os }}"
