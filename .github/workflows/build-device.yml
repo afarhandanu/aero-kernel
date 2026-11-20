@@ -21,11 +21,7 @@ on:
         required: false
         type: number
         default: 14
-      ksu_enabled:
-        description: Enable ZephyrSU
-        required: false
-          type: boolean
-        default: true
+      ksu_enabled: { description: Enable ZephyrSU, required: false, type: boolean, default: true }
 
 jobs:
   build:
