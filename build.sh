@@ -42,6 +42,12 @@ echo " "
 # Load device metadata
 echo "-- Loading device settings..."
 source "devices/$DEVICE/$OS.conf" || { echo "-- ERROR: could not load device settings"; exit 1; }
+# Bisect 1: KSU_ENABLED=false disables ZephyrSU
+# KSU_ENABLED=false forces KERNELSU=false, so goodies.sh skips kernelsu.sh.
+if [ "$KSU_ENABLED" = false ]; then
+echo -- ZephyrSU disabled by KSU_ENABLED=false
+KERNELSU=false
+fi
 
 # Export build metadata for make and helper scripts
 DEVICE_NAME="$DEVICE"
