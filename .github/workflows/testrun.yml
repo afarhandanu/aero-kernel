@@ -13,6 +13,11 @@ on:
           required: false
           type: boolean
           default: true
+      susfs_enabled:
+          description: Enable SUSFS (ZephyrSU builtin branch, manual hooks)
+          required: false
+          type: boolean
+          default: true
 
 jobs:
   setup:
@@ -52,4 +57,5 @@ jobs:
       build_type: ${{ needs.setup.outputs.build_type }}
       artifact_retention_days: 7
       ksu_enabled: ${{ inputs.ksu_enabled }}
+      susfs_enabled: ${{ inputs.susfs_enabled }}
     secrets: inherit
