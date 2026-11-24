@@ -65,6 +65,17 @@ if [[ "$KERNEL_VERSION" == "4.19" ]]; then
     sed -i 's|^[[:space:]]*mnt = alloc_vfsmnt(fc->source ?: "none");|#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\t// - We will just stop checking for ksu process if /sdcard/Android is accessible,\n\t//   for the sake of performance\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: "none");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif|' fs/namespace.c
 fi
 
+# 4.19 compat (runs after setup above, before build.sh compiles):
+# linux/static_call.h does not exist before kernel 5.5. The builtin
+# branch includes it unconditionally in kernel_includes.h, while every
+# real static_call use is guarded to >= 6.12, so guard the include.
+for _ksu_inc in KernelSU/kernel/kernel_includes.h drivers/kernelsu/kernel_includes.h; do
+  if [ -f "$_ksu_inc" ] && grep -q '#include <linux/static_call.h>' "$_ksu_inc"; then
+    sed -i 's|#include <linux/static_call.h>|#include <linux/version.h>\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)\n#include <linux/static_call.h>\n#endif|' "$_ksu_inc"
+    echo "-- ZephyrSU: Guarded static_call.h include in $_ksu_inc for 4.19..."
+  fi
+done
+
 # Apply manual (inline) hooks
 echo "-- ZephyrSU: Applying inline hooks..."
 curl -LSs --fail --retry 3 "$KSU_HOOK" | bash &> /dev/null || { echo "-- Fatal: inline hook script failed to download or run!"; exit 1; }
