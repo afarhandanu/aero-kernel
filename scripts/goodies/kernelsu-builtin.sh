@@ -76,6 +76,7 @@ for _ksu_inc in KernelSU/kernel/kernel_includes.h drivers/kernelsu/kernel_includ
   fi
 done
 
+
 # Apply manual (inline) hooks
 echo "-- ZephyrSU: Applying inline hooks..."
 curl -LSs --fail --retry 3 "$KSU_HOOK" | bash &> /dev/null || { echo "-- Fatal: inline hook script failed to download or run!"; exit 1; }
@@ -106,3 +107,13 @@ unstatic "security/selinux/hooks.c" "int inode_doinit_with_dentry"
 unstatic "security/selinux/ss/services.c" "void security_dump_masked_av"
 unstatic "security/selinux/ss/services.c" "void context_struct_compute_av"
 cd ..
+
+# 4.19 compat: access_ok() takes (type, addr, size) before kernel 5.0.
+# kpm.c uses the modern 2-arg form; it writes the result back to
+# userspace, so use VERIFY_WRITE. Only one access_ok call in ZephyrSU.
+for _kpm in KernelSU/kernel/extension/kpm/kpm.c drivers/kernelsu/extension/kpm/kpm.c; do
+  if [ -f "$_kpm" ] && grep -q 'access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))' "$_kpm"; then
+    sed -i 's|access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))|access_ok(VERIFY_WRITE, u64_to_user_ptr(cmd.result_code), sizeof(result))|' "$_kpm"
+    echo "-- ZephyrSU: Fixed access_ok call in $_kpm for 4.19..."
+  fi
+done
