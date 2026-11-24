@@ -111,9 +111,12 @@ cd ..
 # 4.19 compat: access_ok() takes (type, addr, size) before kernel 5.0.
 # kpm.c uses the modern 2-arg form; it writes the result back to
 # userspace, so use VERIFY_WRITE. Only one access_ok call in ZephyrSU.
+cd "$KERNEL_DIR"
 for _kpm in KernelSU/kernel/extension/kpm/kpm.c drivers/kernelsu/extension/kpm/kpm.c; do
   if [ -f "$_kpm" ] && grep -q 'access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))' "$_kpm"; then
     sed -i 's|access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))|access_ok(VERIFY_WRITE, u64_to_user_ptr(cmd.result_code), sizeof(result))|' "$_kpm"
     echo "-- ZephyrSU: Fixed access_ok call in $_kpm for 4.19..."
   fi
 done
+
+cd ..
