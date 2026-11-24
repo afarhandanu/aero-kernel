@@ -22,6 +22,7 @@ on:
         type: number
         default: 14
       ksu_enabled: { description: Enable ZephyrSU, required: false, type: boolean, default: true }
+      susfs_enabled: { description: Enable SUSFS (ZephyrSU builtin branch), required: false, type: boolean, default: true }
 
 jobs:
   build:
@@ -71,6 +72,7 @@ jobs:
           BUILD_DATE: ${{ inputs.build_date }}
           BUILD_TYPE: ${{ inputs.build_type }}
           KSU_ENABLED: ${{ inputs.ksu_enabled }}
+          SUSFS_ENABLED: ${{ inputs.susfs_enabled }}
         run: |
           chmod +x build.sh
           ./build.sh "${{ inputs.device }}" "${{ inputs.os }}"
