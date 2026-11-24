@@ -1,9 +1,15 @@
 #!/bin/bash
 
 # KernelSU / ZephyrSU
+# SUSFS_ENABLED=false keeps the old main-branch (kprobes) flow.
 if [ "$KERNELSU" = true ]; then
-  chmod +x scripts/goodies/kernelsu.sh
-  source scripts/goodies/kernelsu.sh
+  if [ "$SUSFS_ENABLED" = false ]; then
+    chmod +x scripts/goodies/kernelsu.sh
+    source scripts/goodies/kernelsu.sh
+  else
+    chmod +x scripts/goodies/kernelsu-builtin.sh
+    source scripts/goodies/kernelsu-builtin.sh
+  fi
 fi
 
 # Baseband Guard
