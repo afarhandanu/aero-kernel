@@ -65,4 +65,31 @@ echo "CONFIG_DM_VERITY=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_DM_VERITY_FEC=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_DM_BOW=y" >> "$FINAL_DEFCONFIG"
 
+# Aero extras. Already on in the Mi-Thorium base, so not repeated here:
+# BBR (built, not default), TTL target (IPv4), zram lz4 default, pstore/ramoops.
+echo "-- Enabling Aero extras (BBR, fq_codel, HL target, zstd, KSM, HZ 250)..."
+# BBR as default TCP congestion control, fq_codel as default qdisc
+echo "CONFIG_TCP_CONG_BBR=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_DEFAULT_BBR=y" >> "$FINAL_DEFCONFIG"
+echo 'CONFIG_DEFAULT_TCP_CONG="bbr"' >> "$FINAL_DEFCONFIG"
+echo "CONFIG_NET_SCH_FQ=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_NET_SCH_FQ_CODEL=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_NET_SCH_DEFAULT=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_DEFAULT_FQ_CODEL=y" >> "$FINAL_DEFCONFIG"
+echo 'CONFIG_DEFAULT_NET_SCH="fq_codel"' >> "$FINAL_DEFCONFIG"
+# TTL (IPv4) / HL (IPv6) targets for tethering
+echo "CONFIG_IP_NF_MANGLE=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_IP_NF_TARGET_TTL=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_IP6_NF_MANGLE=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_NETFILTER_XT_TARGET_HL=y" >> "$FINAL_DEFCONFIG"
+# zstd as an extra zram algorithm (lz4 stays the default)
+echo "CONFIG_CRYPTO_ZSTD=y" >> "$FINAL_DEFCONFIG"
+# KSM
+echo "CONFIG_KSM=y" >> "$FINAL_DEFCONFIG"
+# Timer frequency 100 -> 250
+sed -i '/^CONFIG_HZ_100=y/d;/^CONFIG_HZ=100/d' "$FINAL_DEFCONFIG"
+echo "# CONFIG_HZ_100 is not set" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_HZ_250=y" >> "$FINAL_DEFCONFIG"
+
 cd ..
