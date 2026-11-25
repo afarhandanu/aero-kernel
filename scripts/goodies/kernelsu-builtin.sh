@@ -39,6 +39,7 @@ echo "-- ZephyrSU: Enabling configs..."
 echo "CONFIG_KSU=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y" >> "$FINAL_DEFCONFIG"
 echo "CONFIG_THREAD_INFO_IN_TASK=y" >> "$FINAL_DEFCONFIG"
+echo "CONFIG_KPM=y" >> "$FINAL_DEFCONFIG"
 
 # Apply SUSFS patch
 echo "-- ZephyrSU: Applying SUSFS patch..."
